@@ -1,5 +1,6 @@
 import { removeFolderFromStorage } from 'flowise-components'
 import { StatusCodes } from 'http-status-codes'
+import { App } from '../..'
 import { ChatflowType, IChatFlow, IReactFlowObject } from '../../Interface'
 import { ChatFlow } from '../../database/entities/ChatFlow'
 import { ChatMessage } from '../../database/entities/ChatMessage'
@@ -109,6 +110,8 @@ const getAllChatflows = async (type?: ChatflowType): Promise<IChatFlow[]> => {
         const dbResponse = await appServer.AppDataSource.getRepository(ChatFlow).find()
         if (type === 'MULTIAGENT') {
             return dbResponse.filter((chatflow) => chatflow.type === type)
+        } else if (type === 'ALL') {
+            return dbResponse
         }
         return dbResponse.filter((chatflow) => chatflow.type === 'CHATFLOW' || !chatflow.type)
     } catch (error) {
@@ -197,9 +200,9 @@ const saveChatflow = async (newChatFlow: ChatFlow): Promise<any> => {
     }
 }
 
-const importChatflows = async (newChatflows: Partial<ChatFlow>[]): Promise<any> => {
+const importChatflows = async (newChatflows: Partial<ChatFlow>[], appServer?: App): Promise<any> => {
     try {
-        const appServer = getRunningExpressApp()
+        if (!appServer) appServer = getRunningExpressApp()
 
         // step 1 - check whether file chatflows array is zero
         if (newChatflows.length == 0) throw new Error('No chatflows in this file.')
@@ -234,7 +237,6 @@ const importChatflows = async (newChatflows: Partial<ChatFlow>[]): Promise<any> 
                 newChatflow.id = undefined
                 newChatflow.name += ' with new id'
             }
-            newChatflow.type = 'CHATFLOW'
             newChatflow.flowData = JSON.stringify(JSON.parse(flowData))
             return newChatflow
         })
