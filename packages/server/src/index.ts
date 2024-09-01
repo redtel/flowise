@@ -20,6 +20,7 @@ import { sanitizeMiddleware, getCorsOptions, getAllowedIframeOrigins } from './u
 import { Telemetry } from './utils/telemetry'
 import flowiseApiV1Router from './routes'
 import errorHandlerMiddleware from './middlewares/errors'
+import { SSEStreamer } from './utils/SSEStreamer'
 import { validateAPIKey } from './utils/validateKey'
 
 declare global {
@@ -37,6 +38,7 @@ export class App {
     cachePool: CachePool
     telemetry: Telemetry
     AppDataSource: DataSource = getDataSource()
+    sseStreamer: SSEStreamer
 
     constructor() {
         this.app = express()
@@ -133,9 +135,9 @@ export class App {
             '/api/v1/leads',
             '/api/v1/get-upload-file',
             '/api/v1/ip',
-            '/api/v1/ping'
-        ]
-        const URL_CASE_INSENSITIVE_REGEX: RegExp = /\/api\/v1\//i
+            '/api/v1/ping',
+                '/api/v1/events'
+            ]const URL_CASE_INSENSITIVE_REGEX: RegExp = /\/api\/v1\//i
         const URL_CASE_SENSITIVE_REGEX: RegExp = /\/api\/v1\//
 
         if (process.env.FLOWISE_USERNAME && process.env.FLOWISE_PASSWORD) {
@@ -200,6 +202,8 @@ export class App {
         }
 
         this.app.use('/api/v1', flowiseApiV1Router)
+        this.sseStreamer = new SSEStreamer(this.app)
+        this.sseStreamer.setupSSEEndpoint()
 
         // ----------------------------------------
         // Configure number of proxies in Host Environment

@@ -5,7 +5,8 @@ import {
     ICommonObject,
     addSingleFileToStorage,
     addArrayFilesToStorage,
-    mapMimeTypeToInputField
+    mapMimeTypeToInputField,
+    IServerSideEventStreamer
 } from 'flowise-components'
 import { StatusCodes } from 'http-status-codes'
 import {
@@ -22,7 +23,6 @@ import {
 } from '../Interface'
 import { InternalFlowiseError } from '../errors/internalFlowiseError'
 import { ChatFlow } from '../database/entities/ChatFlow'
-import { Server } from 'socket.io'
 import { getRunningExpressApp } from '../utils/getRunningExpressApp'
 import {
     isFlowValidForStream,
@@ -56,10 +56,9 @@ import { IAction } from 'flowise-components'
 /**
  * Build Chatflow
  * @param {Request} req
- * @param {Server} socketIO
  * @param {boolean} isInternal
  */
-export const utilBuildChatflow = async (req: Request, socketIO?: Server, isInternal: boolean = false): Promise<any> => {
+export const utilBuildChatflow = async (req: Request, isInternal: boolean = false): Promise<any> => {
     try {
         const appServer = getRunningExpressApp()
         const chatflowid = req.params.id
@@ -78,7 +77,6 @@ export const utilBuildChatflow = async (req: Request, socketIO?: Server, isInter
 
         const chatId = incomingInput.chatId ?? incomingInput.overrideConfig?.sessionId ?? uuidv4()
         const userMessageDateTime = new Date()
-
         if (!isInternal) {
             const isKeyValidated = await validateChatflowAPIKey(req, chatflow)
             if (!isKeyValidated) {
@@ -161,8 +159,7 @@ export const utilBuildChatflow = async (req: Request, socketIO?: Server, isInter
             }
             incomingInput = {
                 question: req.body.question ?? 'hello',
-                overrideConfig,
-                socketIOClientId: req.body.socketIOClientId
+                overrideConfig
             }
         }
 
@@ -181,7 +178,9 @@ export const utilBuildChatflow = async (req: Request, socketIO?: Server, isInter
         const { graph, nodeDependencies } = constructGraphs(nodes, edges)
         const directedGraph = graph
         const endingNodes = getEndingNodes(nodeDependencies, directedGraph, nodes)
-
+        // if this is an external prediction call, and they have requested streaming
+        let streamResponse = isStreamValid ? !isInternal && req.body.streaming === 'true' : false
+        console.log('streamResponse', streamResponse)
         /*** If the graph is an agent graph, build the agent response ***/
         if (endingNodes.filter((node) => node.data.category === 'Multi Agents' || node.data.category === 'Sequential Agents').length) {
             return await utilBuildAgentResponse(
@@ -195,8 +194,9 @@ export const utilBuildChatflow = async (req: Request, socketIO?: Server, isInter
                 incomingInput,
                 nodes,
                 edges,
-                socketIO,
-                baseURL
+                baseURL,
+                appServer.sseStreamer,
+                streamResponse
             )
         }
 
@@ -260,6 +260,7 @@ export const utilBuildChatflow = async (req: Request, socketIO?: Server, isInter
 
             // Once custom function ending node exists, flow is always unavailable to stream
             isStreamValid = isCustomFunctionEndingNode ? false : isStreamValid
+            streamResponse = isStreamValid ? !isInternal && req.body.streaming === 'true' : false
 
             let chatHistory: IMessage[] = []
 
@@ -320,9 +321,7 @@ export const utilBuildChatflow = async (req: Request, socketIO?: Server, isInter
                 cachePool: appServer.cachePool,
                 isUpsert: false,
                 uploads: incomingInput.uploads,
-                baseURL,
-                socketIO,
-                socketIOClientId: incomingInput.socketIOClientId
+                baseURL
             })
 
             const nodeToExecute =
@@ -363,6 +362,7 @@ export const utilBuildChatflow = async (req: Request, socketIO?: Server, isInter
         const nodeInstanceFilePath = appServer.nodesPool.componentNodes[nodeToExecuteData.name].filePath as string
         const nodeModule = await import(nodeInstanceFilePath)
         const nodeInstance = new nodeModule.nodeClass({ sessionId })
+        console.log('streamResponse 2', isStreamValid)
 
         let result = isStreamValid
             ? await nodeInstance.run(nodeToExecuteData, incomingInput.question, {
@@ -373,9 +373,9 @@ export const utilBuildChatflow = async (req: Request, socketIO?: Server, isInter
                   databaseEntities,
                   analytic: chatflow.analytic,
                   uploads: incomingInput.uploads,
-                  socketIO,
-                  socketIOClientId: incomingInput.socketIOClientId,
-                  prependMessages
+                  prependMessages,
+                  sseStreamer: appServer.sseStreamer,
+                  shouldStreamResponse: isStreamValid
               })
             : await nodeInstance.run(nodeToExecuteData, incomingInput.question, {
                   chatId,
@@ -442,6 +442,8 @@ export const utilBuildChatflow = async (req: Request, socketIO?: Server, isInter
         result.question = incomingInput.question
         result.chatId = chatId
         result.chatMessageId = chatMessage?.id
+        result.isStreamValid = isStreamValid
+
         if (sessionId) result.sessionId = sessionId
         if (memoryType) result.memoryType = memoryType
 
@@ -467,12 +469,22 @@ const utilBuildAgentResponse = async (
     incomingInput: IncomingInput,
     nodes: IReactFlowNode[],
     edges: IReactFlowEdge[],
-    socketIO?: Server,
-    baseURL?: string
+    baseURL?: string,
+    sseStreamer?: IServerSideEventStreamer,
+    shouldStreamResponse?: boolean
 ) => {
     try {
         const appServer = getRunningExpressApp()
-        const streamResults = await buildAgentGraph(agentflow, chatId, sessionId, incomingInput, isInternal, baseURL, socketIO)
+        const streamResults = await buildAgentGraph(
+            agentflow,
+            chatId,
+            sessionId,
+            incomingInput,
+            isInternal,
+            baseURL,
+            sseStreamer,
+            shouldStreamResponse
+        )
         if (streamResults) {
             const { finalResult, finalAction, sourceDocuments, usedTools, agentReasoning } = streamResults
             const userMessage: Omit<IChatMessage, 'id'> = {
